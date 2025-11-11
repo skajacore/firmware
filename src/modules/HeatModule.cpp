@@ -7,41 +7,57 @@
 
 ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
-    assert(currentRequest); // should always be !NULL
-
-    auto req = *currentRequest;
-    auto &p = req.decoded;
+    auto &p = mp.decoded;
     // The incoming message is in p.payload
-    LOG_INFO("HH: Received message from=0x%0x, id=%d, chan=%d, msg=%.*s", req.from, req.id, (uint32_t)req.channel, p.payload.size, p.payload.bytes);
+    LOG_INFO("HH: Received message from=0x%0x, id=%d, chan=%d, msg=%.*s", mp.from, mp.id, (uint32_t)mp.channel, p.payload.size, p.payload.bytes);
 
     // Only process on non default channel
-    if (channels.isDefaultChannel(req.channel)){
+    if (channels.isDefaultChannel(mp.channel)){
         LOG_INFO("HH: Packet ignored");
         return ProcessMessage::CONTINUE;
     }
 
+    bool actionTaken = 0;
     auto incomingMessage = reinterpret_cast<const char *>(p.payload.bytes);
     if (strncasecmp(incomingMessage, "heat ", 5) == 0){
         if (strncasecmp(incomingMessage+5, "high", 4) == 0){
             heatPower(3);
+            actionTaken = 1;
         } else 
         if (strncasecmp(incomingMessage+5, "med", 3) == 0){
             heatPower(2);
+            actionTaken = 1;
         } else
         if (strncasecmp(incomingMessage+5, "low", 3) == 0){
             heatPower(1);
+            actionTaken = 1;
         } else
         if (strncasecmp(incomingMessage+5, "off", 3) == 0){
             heatPower(0);
+            actionTaken = 1;
         }
     }
     else if (strncasecmp(incomingMessage, "outlet off", 10) == 0){
         digitalWrite(OUTLETPIN,LOW);
         powerstate = 0;
+        actionTaken = 1;
     }
     else if (strncasecmp(incomingMessage, "outlet on", 9) == 0){
         digitalWrite(OUTLETPIN,HIGH);
         powerstate = 1;
+        actionTaken = 1;
+    }
+
+    if (actionTaken){
+        auto reply = allocDataPacket();
+        reply->channel = mp.channel;
+        reply->decoded.reply_id = mp.id;
+        reply->decoded.payload.size = p.payload.size;
+        memcpy(reply->decoded.payload.bytes, p.payload.bytes, reply->decoded.payload.size);
+
+        service->sendToMesh(reply);
+        
+        return ProcessMessage::CONTINUE;
     }
 
     return ProcessMessage::CONTINUE;

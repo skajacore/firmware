@@ -5,6 +5,8 @@
 
 #include <assert.h>
 
+
+
 ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
     auto &p = mp.decoded;
@@ -18,6 +20,7 @@ ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
     }
 
     bool actionTaken = 0;
+    bool sendTemp = 0;
     auto incomingMessage = reinterpret_cast<const char *>(p.payload.bytes);
     if (strncasecmp(incomingMessage, "heat ", 5) == 0){
         if (strncasecmp(incomingMessage+5, "high", 4) == 0){
@@ -47,6 +50,9 @@ ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
         powerstate = 1;
         actionTaken = 1;
     }
+    else if (strncasecmp(incomingMessage, "temp", 9) == 0){
+        sendTemp = 1;
+    }
 
     if (actionTaken){
         auto reply = allocDataPacket();
@@ -54,16 +60,27 @@ ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
         reply->decoded.reply_id = mp.id;
         reply->decoded.payload.size = p.payload.size;
         memcpy(reply->decoded.payload.bytes, p.payload.bytes, reply->decoded.payload.size);
-
         service->sendToMesh(reply);
-        
-        return ProcessMessage::CONTINUE;
+    }
+
+    if (sendTemp){
+        auto reply = allocDataPacket();
+        reply->channel = mp.channel;
+        reply->decoded.reply_id = mp.id;
+        reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 12, "Temp: %0.1f", tempF);
+        service->sendToMesh(reply);
     }
 
     return ProcessMessage::CONTINUE;
 }
 
 int32_t HeatModule::runOnce(){
+    tempF = _sensors.getTempCByIndex(0)*1.8+32;
+    
+    ESP_LOGI("HH","temp: %f", tempF);
+    // print
+    _sensors.requestTemperatures();  // async update
+
     if (powercycle){
         if (powerstate){
             digitalWrite(OUTLETPIN, LOW);

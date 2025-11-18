@@ -29,7 +29,8 @@ class HeatModule : public SinglePortModule, private concurrency::OSThread
         HT_OFF,
         HT_HIGH,
         HT_MED,
-        HT_LOW
+        HT_LOW,
+        HT_NVAL
     };    
 
     // Setup a oneWire instance to communicate with any OneWire devices

@@ -120,6 +120,7 @@ int32_t HeatModule::runOnce(){
 
     if (heatLevel > HT_OFF && tempSetpoint > 1.0f){
         if (powerstate && tempF > (tempSetpoint + tempHysteresis)){
+            clicks = HT_NVAL-heatLevel;
             digitalWrite(OUTLETPIN, LOW);
             powerstate = 0;
         } else

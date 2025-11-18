@@ -5,8 +5,6 @@
 
 #include <assert.h>
 
-
-
 ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
     auto &p = mp.decoded;
@@ -18,58 +16,95 @@ ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
         LOG_INFO("HH: Packet ignored");
         return ProcessMessage::CONTINUE;
     }
+    
+    Action action = ACT_NONE;
 
-    bool actionTaken = 0;
-    bool sendTemp = 0;
-    auto incomingMessage = reinterpret_cast<const char *>(p.payload.bytes);
-    if (strncasecmp(incomingMessage, "heat ", 5) == 0){
-        if (strncasecmp(incomingMessage+5, "high", 4) == 0){
-            heatPower(3);
-            actionTaken = 1;
-        } else 
-        if (strncasecmp(incomingMessage+5, "med", 3) == 0){
-            heatPower(2);
-            actionTaken = 1;
+    char * str = new char[p.payload.size];
+    for(int i = 0; p.payload.bytes[i] && (i < p.payload.size); i++){
+      str[i] = tolower(p.payload.bytes[i]);
+    }
+
+    char* a = strstr(str, "heat ");
+    if (a){
+        heatLevel = (
+            strncasecmp(a+5, "high", 4) == 0 ? HT_HIGH :
+            strncasecmp(a+5, "med", 3) == 0 ? HT_MED :
+            strncasecmp(a+5, "low", 3) == 0 ? HT_LOW :
+            HT_OFF
+        );
+        action = ACT_HEAT;
+    }
+    a = strstr(str, "outlet ");
+    if (a){
+        if (strncasecmp(a+7, "off", 3) == 0){
+            digitalWrite(OUTLETPIN,LOW);
+            powerstate = 0;
         } else
-        if (strncasecmp(incomingMessage+5, "low", 3) == 0){
-            heatPower(1);
-            actionTaken = 1;
-        } else
-        if (strncasecmp(incomingMessage+5, "off", 3) == 0){
-            heatPower(0);
-            actionTaken = 1;
+        if (strncasecmp(a+7, "on", 2) == 0){
+            digitalWrite(OUTLETPIN,HIGH);
+            powerstate = 1;
         }
-    }
-    else if (strncasecmp(incomingMessage, "outlet off", 10) == 0){
-        digitalWrite(OUTLETPIN,LOW);
-        powerstate = 0;
-        actionTaken = 1;
-    }
-    else if (strncasecmp(incomingMessage, "outlet on", 9) == 0){
-        digitalWrite(OUTLETPIN,HIGH);
-        powerstate = 1;
-        actionTaken = 1;
-    }
-    else if (strncasecmp(incomingMessage, "temp", 9) == 0){
-        sendTemp = 1;
+        action = (action ? ACT_STATUS : ACT_OUTLET);
     }
 
-    if (actionTaken){
+    a = strstr(str, "status");
+    if (a){
+        action = ACT_STATUS;
+    }
+    
+    a = strstr(str, "set ");
+    if (a){
+        tempSetpoint = atof(a+4);
+        action = (action ? ACT_STATUS : ACT_SETPOINT);
+    }
+    
+    a = strstr(str, "hyst ");
+    if (a){
+        tempHysteresis = atof(a+5);
+        action = (action ? ACT_STATUS : ACT_HYSTERESIS);
+    }
+
+    if (action > ACT_NONE){
         auto reply = allocDataPacket();
         reply->channel = mp.channel;
         reply->decoded.reply_id = mp.id;
-        reply->decoded.payload.size = p.payload.size;
-        memcpy(reply->decoded.payload.bytes, p.payload.bytes, reply->decoded.payload.size);
+
+        switch(action){
+            case ACT_HEAT:
+            case ACT_OUTLET:
+                reply->decoded.payload.size = p.payload.size;
+                memcpy(reply->decoded.payload.bytes, p.payload.bytes, reply->decoded.payload.size);
+                break;
+            case ACT_TEMP:
+                reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 12, "Temp: %0.1f", tempF);
+                break;
+            case ACT_SETPOINT:
+                reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 12, "Set: %0.1f", tempSetpoint);
+                break;
+            case ACT_HYSTERESIS:
+                reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 12, "Hyst: %0.1f", tempSetpoint);
+                break;
+            case ACT_STATUS:
+                reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 233,
+                    "PWR: %s\nHTL: %s\nT: %0.1fF\nS: %0.1fF\nH: %0.1fF", 
+                    (powerstate ? "on" : "off"),
+                    (
+                        heatLevel == HT_LOW ? "low" :
+                        heatLevel == HT_MED ? "med" :
+                        heatLevel == HT_HIGH ? "high" :
+                        "off"
+                    ),
+                    tempF,
+                    tempSetpoint,
+                    tempHysteresis);
+                break;
+            default:
+                break;
+        }
+
         service->sendToMesh(reply);
     }
 
-    if (sendTemp){
-        auto reply = allocDataPacket();
-        reply->channel = mp.channel;
-        reply->decoded.reply_id = mp.id;
-        reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 12, "Temp: %0.1f", tempF);
-        service->sendToMesh(reply);
-    }
 
     return ProcessMessage::CONTINUE;
 }
@@ -77,7 +112,23 @@ ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
 int32_t HeatModule::runOnce(){
     tempF = _sensors.getTempCByIndex(0)*1.8+32;
     
-    ESP_LOGI("HH","temp: %f", tempF);
+    if (tempF < -100.0f){
+        digitalWrite(OUTLETPIN, LOW);
+        powerstate = 0;
+        return 1000;
+    }
+
+    if (heatLevel > HT_OFF && tempSetpoint > 1.0f){
+        if (powerstate && tempF > (tempSetpoint + tempHysteresis)){
+            digitalWrite(OUTLETPIN, LOW);
+            powerstate = 0;
+        } else
+        if ((!powerstate || (heatLevel != lastHeatLevel)) && tempF < (tempSetpoint - tempHysteresis)){
+            heatPower(heatLevel);
+        }
+    }
+
+    //ESP_LOGI("HH","temp: %f", tempF);
     // print
     _sensors.requestTemperatures();  // async update
 
@@ -111,17 +162,10 @@ int32_t HeatModule::runOnce(){
     return 1000;
 }
 
-void HeatModule::heatPower(uint8_t level){
+void HeatModule::heatPower(HtLevel level){
     powercycle = 1;
-    switch (level){
-        case 0:
-            clicks = 0; break;
-        case 1:
-            clicks = 3; break;
-        case 2:
-            clicks = 2; break;
-        case 3:
-            clicks = 1; break;
-    }
-    LOG_INFO("HH: heatPower set to %d", level);
+    heatLevel = level;
+    lastHeatLevel = level;
+    clicks = (uint8_t)level;
+    LOG_INFO("HH: heatPower set to %d", (level == HT_HIGH ? "high" : level == HT_MED ? "med" : level == HT_LOW ? "low" : "off"));
 }

@@ -64,6 +64,30 @@ ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
         action = (action ? ACT_STATUS : ACT_HYSTERESIS);
     }
 
+    a = strstr(str, "dc ");
+    if (a){
+        dutyCycle = max(0,min(100,atoi(a+3)));
+        action = (action ? ACT_STATUS : ACT_DUTYCYCLE);
+    }
+
+    a = strstr(str, "kp ");
+    if (a){
+        Kp = atof(a+3);
+        action = (action ? ACT_STATUS : ACT_GAINS);
+    }
+
+    a = strstr(str, "ki ");
+    if (a){
+        Ki = atof(a+3);
+        action = (action ? ACT_STATUS : ACT_GAINS);
+    }
+
+    a = strstr(str, "per ");
+    if (a){
+        dcperiod = atof(a+4);
+        action = (action ? ACT_STATUS : ACT_DCPERIOD);
+    }
+
     if (action > ACT_NONE){
         auto reply = allocDataPacket();
         reply->channel = mp.channel;
@@ -81,12 +105,21 @@ ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
             case ACT_SETPOINT:
                 reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 12, "Set: %0.1f", tempSetpoint);
                 break;
+            case ACT_DUTYCYCLE:
+                reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 12, "dc: %1.0f%%", dutyCycle);
+                break;
+            case ACT_GAINS:
+                reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 24, "Kp: %1.3f\nKi: %1.3f", Kp, Ki);
+                break;
+            case ACT_DCPERIOD:
+                reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 12, "period: %0.1f", dcperiod);
+                break;
             case ACT_HYSTERESIS:
                 reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 12, "Hyst: %0.1f", tempSetpoint);
                 break;
             case ACT_STATUS:
                 reply->decoded.payload.size = snprintf((char*)(reply->decoded.payload.bytes), 233,
-                    "PWR: %s\nHTL: %s\nT: %0.1fF\nS: %0.1fF\nH: %0.1fF", 
+                    "PWR: %s\nHTL: %s\nDC: %0.1f(%0.1f)\nPER: %0.1f\nT: %0.1fF\nS: %0.1fF\nKp: %0.3f\nKi: %0.3f", 
                     (powerstate ? "on" : "off"),
                     (
                         heatLevel == HT_LOW ? "low" :
@@ -94,9 +127,13 @@ ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
                         heatLevel == HT_HIGH ? "high" :
                         "off"
                     ),
+                    outputdc,
+                    dutyCycle,
+                    dcperiod,
                     tempF,
                     tempSetpoint,
-                    tempHysteresis);
+                    Kp,
+                    Ki);
                 break;
             default:
                 break;
@@ -109,58 +146,54 @@ ProcessMessage HeatModule::handleReceived(const meshtastic_MeshPacket &mp)
     return ProcessMessage::CONTINUE;
 }
 
+unsigned long lastcycle;
+
 int32_t HeatModule::runOnce(){
+
     tempF = _sensors.getTempCByIndex(0)*1.8+32;
     
-    if (tempF < -100.0f){
+    /*if (tempF < -100.0f){
         digitalWrite(OUTLETPIN, LOW);
         powerstate = 0;
         return 1000;
-    }
+    }*/
 
     if (heatLevel > HT_OFF && tempSetpoint > 1.0f){
-        if (powerstate && tempF > (tempSetpoint + tempHysteresis)){
-            clicks = HT_NVAL-heatLevel;
-            digitalWrite(OUTLETPIN, LOW);
-            powerstate = 0;
-        } else
-        if ((!powerstate || (heatLevel != lastHeatLevel)) && tempF < (tempSetpoint - tempHysteresis)){
-            heatPower(heatLevel);
-        }
+      outputdc = dutyCycle;
+
+      if (tempF > -40 && (Kp > 0 || Ki > 0)){
+        integrator = integrator + Ki*(tempSetpoint - tempF)*0.033;
+        integrator = fmaxf(0.0,fminf(100,integrator));
+        outputdc = dutyCycle + integrator + Kp*(tempSetpoint - tempF);
+      }
+
+      while ((millis() - lastcycle) > dcperiod*1000.0f){
+          lastcycle = lastcycle + dcperiod*1000.0f;
+      };
+
+      float millisOn = (dcperiod*1000.0f*outputdc/100.f);
+      if ((millis()-lastcycle) > millisOn){
+          digitalWrite(OUTLETPIN, LOW);
+          powerstate = 0;
+      } else if ((millis()-lastcycle) <= millisOn){
+          digitalWrite(OUTLETPIN, HIGH);
+          powerstate = 1;
+      }
     }
 
     //ESP_LOGI("HH","temp: %f", tempF);
     // print
     _sensors.requestTemperatures();  // async update
 
-    if (powercycle){
-        if (powerstate){
-            digitalWrite(OUTLETPIN, LOW);
-            powerstate = 0;
-            ESP_LOGI("HH","outlet off");
-            return 500;
-        } else {
-            digitalWrite(OUTLETPIN, HIGH);
-            powerstate = 1;
-            powercycle = 0;
-            ESP_LOGI("HH","outlet on");
-            return 1500;
-        }
-    } else {
-        if (clicks > 0){
-            if (!switchstate){
-                digitalWrite(HEATPIN, HIGH);
-                switchstate = 1;
-            } else {
-                digitalWrite(HEATPIN, LOW);
-                switchstate = 0;
-                clicks--;
-            }
-            ESP_LOGI("HH","clicks: %d heatpin: %d", clicks, switchstate);
-        }
-        return 500;
+    return 33;
+}
+
+void HeatModule::heatOff(){
+    if (powerstate){
+        clicks = HT_NVAL-heatLevel;
     }
-    return 1000;
+    digitalWrite(OUTLETPIN, LOW);
+    powerstate = 0;
 }
 
 void HeatModule::heatPower(HtLevel level){

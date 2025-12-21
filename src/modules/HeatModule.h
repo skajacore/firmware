@@ -20,6 +20,9 @@ class HeatModule : public SinglePortModule, private concurrency::OSThread
         ACT_HEAT,
         ACT_OUTLET,
         ACT_SETPOINT,
+        ACT_DCPERIOD,
+        ACT_GAINS,
+        ACT_DUTYCYCLE,
         ACT_HYSTERESIS,
         ACT_TEMP,
         ACT_STATUS
@@ -50,9 +53,17 @@ class HeatModule : public SinglePortModule, private concurrency::OSThread
       digitalWrite(7, HIGH);
       powerstate = 0;
       powercycle = 0;
+      dcperiod = 3.333;
+      dutyCycle = 0;
       switchstate = 0;
       tempSetpoint = 0;
       tempHysteresis = 1;
+      integrator = 0;
+      Kp = 0;
+      Ki = 0;
+
+      lastChangeTime = 0;
+
       clicks = 0;
 
       heatLevel = HT_OFF;
@@ -73,15 +84,24 @@ class HeatModule : public SinglePortModule, private concurrency::OSThread
     virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
 
     uint8_t clicks;
+    float dcperiod;
     bool powercycle;
     bool powerstate;
+    float dutyCycle;
+    float outputdc;
     bool switchstate;
     HtLevel heatLevel;
     HtLevel lastHeatLevel;
+    float integrator, Kp, Ki;
+    
+    static bool targetCaptured;
+    unsigned long long lastChangeTime;
+
     float tempSetpoint;
     float tempHysteresis;
     float tempF;
     void heatPower(HtLevel level);
+    void heatOff();
     
 };
 
